@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>농장 보안 AI 출입 통제 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700&display=swap');
+        body { font-family: 'Noto Sans KR', sans-serif; background-color: #0f172a; color: #f8fafc; margin: 0; display: flex; flex-direction: column; min-height: 100dvh; overflow-x: hidden; }
+        .main-content { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 1.5rem 1rem; gap: 1.25rem; }
+        .media-container { position: relative; width: 100%; max-width: 320px; aspect-ratio: 1 / 1; background-color: #1e293b; border-radius: 1.5rem; overflow: hidden; border: 2px solid #334155; display: flex; align-items: center; justify-content: center; }
+
+        /* ✅ 웹캠 canvas/video가 꽉 차도록 강제 */
+        #webcam-container { width: 100%; height: 100%; position: absolute; inset: 0; }
+        #webcam-container canvas,
+        #webcam-container video {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+            display: block;
+        }
+        #file-preview { width: 100%; height: 100%; object-fit: cover; position: absolute; inset: 0; display: none; }
+
+        .scan-line { position: absolute; top: 0; left: 0; width: 100%; height: 3px; background: #22d3ee; box-shadow: 0 0 15px #22d3ee; animation: scan 2s ease-in-out infinite; z-index: 10; display: none; }
+        @keyframes scan { 0%, 100% { top: 5%; opacity: 0.1; } 50% { top: 95%; opacity: 1; } }
+        .overlay { position: absolute; inset: 0; border: 8px solid transparent; transition: all 0.3s ease; pointer-events: none; z-index: 20; border-radius: 1.5rem; }
+        .status-granted { border-color: #10b981; background: rgba(16, 185, 129, 0.1); }
+        .status-denied { border-color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+        .status-pending { border-color: #f59e0b; background: rgba(245, 158, 11, 0.1); }
+    </style>
+</head>
+<body class="bg-slate-950">
+
+    <header class="p-5 bg-slate-900 border-b border-slate-800 text-center shrink-0">
+        <h1 class="text-xl font-black text-white tracking-tight">FARM SECURITY <span class="text-cyan-400">AI</span></h1>
+    </header>
+
+    <div class="main-content">
+        <div class="text-center space-y-1">
+            <h2 id="statusTitle" class="text-xl font-black text-slate-200 uppercase">System Ready</h2>
+            <p id="statusDesc" class="text-sm text-slate-500 font-medium">아래 버튼을 눌러 카메라 권한을 허용해 주십시오.</p>
+        </div>
+
+        <div class="media-container" id="displayWrapper">
+            <div id="scanLine" class="scan-line"></div>
+            <div id="visualOverlay" class="overlay"></div>
+
+            <!-- 카메라 꺼진 상태 placeholder -->
+            <div id="cameraPlaceholder" class="text-center p-6 z-10">
+                <p class="text-slate-500 text-xs font-bold uppercase tracking-widest mb-2">Camera Off</p>
+                <p class="text-slate-400 text-[10px]">권한 요청 후 화면이 나타남.</p>
+            </div>
+
+            <!-- Teachable Machine 웹캠 canvas가 여기 삽입됨 -->
+            <div id="webcam-container"></div>
+
+            <!-- 파일 분석용 이미지 -->
+            <img id="file-preview" src="" alt="preview">
+
+            <!-- 로딩 스피너 -->
+            <div id="loading-spinner" style="display:none;" class="absolute flex flex-col items-center gap-2 z-30 bg-slate-900/80 p-4 rounded-xl">
+                <div class="w-8 h-8 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
+                <p id="loading-text" class="text-[10px] text-cyan-400 font-bold uppercase tracking-widest">Loading AI...</p>
+            </div>
+        </div>
+
+        <div class="flex flex-col gap-2 w-full max-w-sm">
+            <button id="cameraBtn" onclick="startSystem()" class="w-full bg-cyan-600 hover:bg-cyan-500 py-4 rounded-2xl font-black text-white text-sm transition-all active:scale-95 flex items-center justify-center gap-2">
+                카메라 시작 및 분석 실행
+            </button>
+            <label class="w-full bg-slate-800 hover:bg-slate-700 py-4 rounded-2xl font-black text-white text-sm transition-all active:scale-95 text-center cursor-pointer flex items-center justify-center gap-2 border border-slate-700">
+                이미지 파일 분석
+                <input type="file" class="hidden" accept="image/*" onchange="handleFileUpload(this)">
+            </label>
+        </div>
+
+        <div class="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
+            <div class="flex divide-x divide-slate-800 border-b border-slate-800">
+                <div class="flex-1 p-4 text-center">
+                    <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-1">AI Result</p>
+                    <p id="labelTarget" class="text-lg font-bold text-slate-200">Waiting...</p>
+                </div>
+                <div class="flex-1 p-4 text-center">
+                    <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-1">Confidence</p>
+                    <p id="labelConfidence" class="text-lg font-bold text-slate-200">0%</p>
+                </div>
+            </div>
+            <div class="p-3 bg-slate-800/40 text-center">
+                <p id="labelGate" class="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">Gate Locked</p>
+            </div>
+        </div>
+
+        <button id="resetBtn" onclick="location.reload()" class="hidden w-full max-w-xs border border-slate-800 py-4 rounded-2xl text-xs font-bold text-slate-500 uppercase tracking-widest">
+            System Reset
+        </button>
+    </div>
+
+    <footer class="p-4 bg-slate-900 border-t border-slate-800 shrink-0">
+        <div id="label-container" class="flex justify-center gap-3 text-[10px] font-mono text-slate-600"></div>
+    </footer>
+
+    <script>
+        const MODEL_URL = "https://teachablemachine.withgoogle.com/models/__Ehx6oZm/";
+        let model, webcam, labelContainer, maxPredictions;
+        let isWebcamRunning = false;
+        let isStarting = false; // 중복 실행 방지
+
+        // ──────────────────────────────────────────
+        // 모델 로드 (중복 방지)
+        // ──────────────────────────────────────────
+        async function loadModel() {
+            if (model) return;
+            toggleLoading(true, "AI 모델 로드 중...");
+            try {
+                model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+                maxPredictions = model.getTotalClasses();
+                labelContainer = document.getElementById("label-container");
+                labelContainer.innerHTML = "";
+                for (let i = 0; i < maxPredictions; i++) {
+                    labelContainer.appendChild(document.createElement("div"));
+                }
+            } finally {
+                toggleLoading(false);
+            }
+        }
+
+        function toggleLoading(show, text = "") {
+            const spinner = document.getElementById('loading-spinner');
+            document.getElementById('loading-text').innerText = text;
+            spinner.style.display = show ? 'flex' : 'none';
+        }
+
+        // ──────────────────────────────────────────
+        // 핵심 수정: getUserMedia를 직접 호출하지 않고
+        // Teachable Machine webcam 에게만 맡김
+        // ──────────────────────────────────────────
+        async function startSystem() {
+            if (isWebcamRunning || isStarting) return;
+            isStarting = true;
+
+            const btn = document.getElementById('cameraBtn');
+            btn.innerText = "시작 중...";
+            btn.classList.add('opacity-50');
+
+            try {
+                await loadModel();
+                await initWebcam();
+            } catch (err) {
+                console.error("시스템 시작 오류:", err);
+
+                let msg = "카메라 오류가 발생했습니다.";
+                if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+                    msg = "카메라 권한이 거부되었습니다.<br>브라우저 또는 기기 설정에서 카메라 권한을 '허용'으로 변경해 주십시오.<br><small>(iPhone: 설정 &gt; Safari &gt; 카메라)</small>";
+                } else if (err.name === "NotFoundError") {
+                    msg = "카메라를 찾을 수 없습니다. 카메라가 연결되어 있는지 확인하세요.";
+                } else if (err.name === "NotReadableError") {
+                    msg = "카메라가 다른 앱에서 사용 중입니다. 다른 앱을 종료 후 시도해 주세요.";
+                }
+
+                document.getElementById('statusDesc').innerHTML = `<span class='text-rose-400 font-bold'>${msg}</span>`;
+                document.getElementById('statusTitle').innerText = "Error";
+                btn.innerText = "다시 시도";
+                btn.classList.remove('opacity-50');
+                isStarting = false;
+            }
+        }
+
+        async function initWebcam() {
+            toggleLoading(true, "카메라 연결 중...");
+
+            /*
+             * ✅ 수정 포인트:
+             * - getUserMedia를 직접 호출하지 않음 (이중 호출로 인한 충돌 방지)
+             * - tmImage.Webcam: (width, height, flip)
+             *   flip=false → 후면카메라 기준, true면 전면카메라처럼 좌우반전
+             * - webcam.setup()의 facingMode는 'environment' (후면)
+             */
+            webcam = new tmImage.Webcam(320, 320, false);
+
+            // iOS Safari 대응: setup에 facingMode 명시
+            await webcam.setup({ facingMode: "environment" });
+
+            // iOS Safari 필수 속성 강제 설정
+            const videoEl = webcam.webcam; // 내부 video 엘리먼트
+            if (videoEl) {
+                videoEl.setAttribute('playsinline', '');
+                videoEl.setAttribute('webkit-playsinline', '');
+                videoEl.muted = true;
+                videoEl.setAttribute('muted', '');
+            }
+
+            await webcam.play();
+            toggleLoading(false);
+
+            // UI 업데이트
+            document.getElementById('cameraPlaceholder').style.display = 'none';
+            document.getElementById('file-preview').style.display = 'none';
+
+            const container = document.getElementById('webcam-container');
+            container.innerHTML = "";
+            container.appendChild(webcam.canvas); // canvas를 DOM에 추가
+
+            isWebcamRunning = true;
+            isStarting = false;
+
+            document.getElementById('scanLine').style.display = 'block';
+            document.getElementById('statusTitle').innerText = "Live Monitoring";
+            document.getElementById('statusDesc').innerText = "카메라 감시 중입니다.";
+            document.getElementById('cameraBtn').innerText = "시스템 작동 중";
+
+            window.requestAnimationFrame(loop);
+        }
+
+        async function loop() {
+            if (!isWebcamRunning) return;
+            webcam.update();
+            await predict(webcam.canvas);
+            window.requestAnimationFrame(loop);
+        }
+
+        // ──────────────────────────────────────────
+        // 파일 업로드 분석
+        // ──────────────────────────────────────────
+        async function handleFileUpload(input) {
+            if (!input.files?.[0]) return;
+
+            // 웹캠 중지
+            isWebcamRunning = false;
+            if (webcam) {
+                try { webcam.stop(); } catch(e) {}
+                webcam = null;
+            }
+
+            try {
+                await loadModel();
+
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const imgEl = document.getElementById('file-preview');
+                    imgEl.src = e.target.result;
+                    imgEl.style.display = 'block';
+
+                    document.getElementById('webcam-container').innerHTML = "";
+                    document.getElementById('cameraPlaceholder').style.display = 'none';
+                    document.getElementById('scanLine').style.display = 'block';
+
+                    imgEl.onload = async function() {
+                        await predict(imgEl);
+                        document.getElementById('scanLine').style.display = 'none';
+                        document.getElementById('resetBtn').classList.remove('hidden');
+                        document.getElementById('statusTitle').innerText = "File Analyzed";
+                        document.getElementById('statusDesc').innerText = "이미지 분석이 완료되었습니다.";
+                    };
+                };
+                reader.readAsDataURL(input.files[0]);
+            } catch(e) {
+                console.error(e);
+                document.getElementById('statusDesc').innerText = "파일 분석 실패.";
+            }
+        }
+
+        // ──────────────────────────────────────────
+        // 예측 및 UI 업데이트
+        // ──────────────────────────────────────────
+        async function predict(source) {
+            if (!model) return;
+            const prediction = await model.predict(source);
+            let top = { className: "", probability: 0 };
+            for (let i = 0; i < maxPredictions; i++) {
+                const p = prediction[i];
+                if (labelContainer && labelContainer.childNodes[i]) {
+                    labelContainer.childNodes[i].innerHTML = `${p.className}: ${(p.probability * 100).toFixed(0)}%`;
+                }
+                if (p.probability > top.probability) top = p;
+            }
+            updateResultUI(top);
+        }
+
+        function updateResultUI(res) {
+            document.getElementById('labelTarget').innerText = res.className;
+            document.getElementById('labelConfidence').innerText = (res.probability * 100).toFixed(0) + "%";
+            const vo = document.getElementById('visualOverlay');
+            const lg = document.getElementById('labelGate');
+            vo.className = "overlay";
+
+            if (res.probability < 0.7) {
+                vo.classList.add('status-pending');
+                lg.innerText = "Check Needed";
+            } else if (res.className === "출입허가") {
+                vo.classList.add('status-granted');
+                lg.innerText = "Gate Opened";
+            } else {
+                vo.classList.add('status-denied');
+                lg.innerText = "Access Denied";
+            }
+        }
+    </script>
+</body>
+</html>
